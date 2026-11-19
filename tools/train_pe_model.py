@@ -15,8 +15,9 @@ The FEATURES list below is the contract with Rust: it must match
 `aether_ml::features::PE_FEATURES` exactly, in order.
 
 Usage:
-    python tools/train_pe_model.py --data features.csv --label-col label \
-        --kind logistic --out assets/models/pe.json
+    python tools/train_pe_model.py --data features.csv \
+        --validation-data features_valid.csv --label-col label \
+        --target-fpr 0.0029 --kind logistic --out assets/models/pe.json
 
 Expected CSV: one row per sample, the feature columns named below plus a
 binary label column (1 = malicious, 0 = benign).
