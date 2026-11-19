@@ -262,30 +262,57 @@ fn ransomware(events: &[Event], graph: &BehaviorGraph) -> Option<Verdict> {
     Some(verdict(level, "behavior.ransomware", score, &mitre, detail))
 }
 
-/// T1071 / T1105 - a script host or injected process beaconing to a public host.
+/// T1071 - a script process repeatedly contacts the same public endpoint.
+/// One connection is ordinary application behavior, not a C2 beacon. Units are
+/// intentionally source-defined: regularity is a ratio of observed intervals.
 fn c2_beacon(events: &[Event], graph: &BehaviorGraph) -> Option<Verdict> {
-    let mut hits = Vec::new();
+    let mut connections: HashMap<(u32, String, u16), Vec<u64>> = HashMap::new();
     for ev in events {
         if let Action::NetConnect { remote, port } = &ev.action {
             let image = graph.image_of(ev.pid);
             if (is_script_host(image) || graph.has_ancestor_in(ev.pid, OFFICE_APPS))
                 && is_public_remote(remote)
             {
-                hits.push(format!("{} -> {}:{}", image, remote, port));
+                connections
+                    .entry((ev.pid, remote.to_ascii_lowercase(), *port))
+                    .or_default()
+                    .push(ev.ts);
             }
         }
     }
-    if hits.is_empty() {
+    let mut beacons = Vec::new();
+    for ((pid, remote, port), mut stamps) in connections {
+        if stamps.len() < 4 {
+            continue;
+        }
+        stamps.sort_unstable();
+        stamps.dedup();
+        if stamps.len() < 4 {
+            continue; // missing timestamps or coincident events
+        }
+        let gaps: Vec<u64> = stamps.windows(2).map(|window| window[1]-window[0]).collect();
+        let mut sorted_gaps = gaps.clone();
+        sorted_gaps.sort_unstable();
+        let median = sorted_gaps[sorted_gaps.len()/2];
+        if median == 0 {
+            continue;
+        }
+        // +-33% jitter around the median, avoiding u64 multiplication overflow.
+        if gaps.iter().all(|&gap| (gap.abs_diff(median) as u128) * 3 <= median as u128) {
+            beacons.push(format!("{} -> {}:{}", graph.image_of(pid), remote, port));
+        }
+    }
+    if beacons.is_empty() {
         return None;
     }
     Some(verdict(
         ThreatLevel::Suspicious,
         "behavior.c2_beacon",
-        0.7,
-        &["T1071", "T1105"],
+        0.72,
+        &["T1071"],
         format!(
-            "script/interpreter contacted external host(s): {}",
-            hits.join(", ")
+            "repeated time-correlated outbound connections (not conclusive proof of C2): {}",
+            beacons.join(", ")
         ),
     ))
 }
