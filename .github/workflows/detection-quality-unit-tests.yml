@@ -7,6 +7,15 @@ on:
       - 'tools/train_pe_model.py'
       - 'tools/threshold_calibration.py'
       - 'tools/test_threshold_calibration.py'
+      - 'tools/behavioral_fusion.py'
+      - 'tools/test_behavioral_fusion.py'
+      - 'tools/elf_hard_example_training.py'
+      - 'tools/holdout_evidence.py'
+      - 'tools/test_holdout_evidence.py'
+      - 'tools/build_exclusion_set.py'
+      - 'tools/test_build_exclusion_set.py'
+      - 'crates/aether-behavior/src/rules.rs'
+      - 'docs/BEHAVIORAL_ENSEMBLE_R5.md'
       - 'tools/test_detection_quality_gate.py'
       - 'docs/DETECTION_TARGETS.md'
       - '.github/workflows/detection-quality-unit-tests.yml'
@@ -30,6 +39,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check PE training script syntax
-        run: python3 -m py_compile tools/train_pe_model.py
+        run: python3 -m py_compile tools/train_pe_model.py tools/behavioral_fusion.py tools/elf_hard_example_training.py tools/holdout_evidence.py tools/build_exclusion_set.py
       - name: Run detection quality gate tests
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v
