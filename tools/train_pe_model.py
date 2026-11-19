@@ -27,6 +27,8 @@ import argparse
 import json
 import sys
 
+from threshold_calibration import select_threshold, evaluate_scores
+
 FEATURES = [
     "section_count",
     "max_entropy",
@@ -43,7 +45,7 @@ FEATURES = [
 ]
 
 
-def train_logistic(X, y):
+def train_logistic(X, y, valid_X=None, valid_y=None, target_fpr=0.0029):
     import numpy as np
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
@@ -52,7 +54,7 @@ def train_logistic(X, y):
     clf = LogisticRegression(max_iter=1000, class_weight="balanced")
     clf.fit(scaler.transform(X), y)
 
-    return {
+    model = {
         "version": 1,
         "kind": "logistic",
         "features": FEATURES,
@@ -62,12 +64,29 @@ def train_logistic(X, y):
         "bias": float(clf.intercept_[0]),
         "threshold": 0.6,
     }
+    if valid_X is not None:
+        import numpy as np
+        valid_scores = clf.predict_proba(scaler.transform(valid_X))[:, 1]
+        threshold64 = select_threshold(valid_y, valid_scores, target_fpr)
+        # Rust consumes f32; rounding upward avoids losing strict ties.
+        threshold32 = np.nextafter(np.float32(threshold64), np.float32(np.inf))
+        model["threshold"] = float(threshold32)
+        model["validation_metrics"] = evaluate_scores(valid_y, valid_scores, model["threshold"])
+        model["target_fpr"] = float(target_fpr)
+        model["calibration_status"] = "validation_only_not_independent_test"
+    else:
+        model["calibration_status"] = "UNVALIDATED_NOT_FOR_RELEASE"
+    return model
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data", required=True, help="CSV of feature vectors + label")
     ap.add_argument("--label-col", default="label")
+    ap.add_argument("--validation-data", help="Separate labeled validation CSV")
+    ap.add_argument("--target-fpr", type=float, default=0.0029)
+    ap.add_argument("--hash-col", default="sha256")
+    ap.add_argument("--allow-unvalidated", action="store_true", help="Research only; keep unvalidated threshold")
     ap.add_argument("--kind", choices=["logistic", "onnx"], default="logistic")
     ap.add_argument("--out", default="assets/models/pe.json")
     args = ap.parse_args()
@@ -79,11 +98,27 @@ def main() -> int:
     if missing:
         sys.exit(f"missing feature columns: {missing}")
 
+    if not args.validation_data and not args.allow_unvalidated:
+        sys.exit("refusing to export unvalidated model: provide --validation-data")
     X = df[FEATURES].to_numpy(dtype="float32")
     y = df[args.label_col].to_numpy()
-
+    valid_X = valid_y = None
+    if args.validation_data:
+        valid = pd.read_csv(args.validation_data)
+        needed = [*FEATURES, args.label_col, args.hash_col]
+        if any(col not in df.columns for col in needed) or any(col not in valid.columns for col in needed):
+            sys.exit("train and validation must contain features, label and SHA-256 columns")
+        if df[args.hash_col].isna().any() or valid[args.hash_col].isna().any():
+            sys.exit("missing sample hashes")
+        train_hashes = df[args.hash_col].astype(str)
+        valid_hashes = valid[args.hash_col].astype(str)
+        if (train_hashes.duplicated().any() or valid_hashes.duplicated().any()
+                or set(train_hashes).intersection(valid_hashes)):
+            sys.exit("duplicate or overlapping sample hashes")
+        valid_X = valid[FEATURES].to_numpy(dtype="float32")
+        valid_y = valid[args.label_col].to_numpy()
     if args.kind == "logistic":
-        model = train_logistic(X, y)
+        model = train_logistic(X, y, valid_X, valid_y, args.target_fpr)
         with open(args.out, "w") as f:
             json.dump(model, f, indent=2)
         print(f"wrote logistic model -> {args.out}")
