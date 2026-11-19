@@ -476,6 +476,45 @@ mod tests {
     }
 
     #[test]
+    fn one_legitimate_public_connection_is_not_a_beacon() {
+        let v = run(r#"[
+            {"ts":5,"pid":1,"action":"process_spawn","child_pid":2,"image":"pwsh.exe"},
+            {"ts":7,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}
+        ]"#);
+        assert!(!v.iter().any(|x| x.signature == "behavior.c2_beacon"));
+    }
+
+    #[test]
+    fn repetitive_regular_egress_from_script_is_suspicious() {
+        let v = run(r#"[
+            {"ts":1,"pid":1,"action":"process_spawn","child_pid":2,"image":"pwsh.exe"},
+            {"ts":10,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443},
+            {"ts":20,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443},
+            {"ts":30,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443},
+            {"ts":40,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}
+        ]"#);
+        assert!(v.iter().any(|x| x.signature == "behavior.c2_beacon"));
+    }
+
+    #[test]
+    fn missing_or_irregular_timestamps_are_not_a_beacon() {
+        for stamps in [
+            [0, 0, 0, 0],
+            [10, 20, 500, 10_000],
+        ] {
+            let data = format!(r#"[
+                {{"pid":1,"action":"process_spawn","child_pid":2,"image":"pwsh.exe"}},
+                {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
+                {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
+                {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
+                {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}}
+            ]"#,stamps[0],stamps[1],stamps[2],stamps[3]);
+            let v=run(&data);
+            assert!(!v.iter().any(|x| x.signature == "behavior.c2_beacon"));
+        }
+    }
+
+    #[test]
     fn network_remote_excludes_reserved_and_documentation_addresses() {
         for address in [
             "127.12.3.4", "0.0.0.0", "100.64.22.11", "169.254.12.8",
