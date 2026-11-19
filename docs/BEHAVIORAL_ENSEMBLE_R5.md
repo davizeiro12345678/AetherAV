@@ -71,6 +71,12 @@ execute the samples. This is a preliminary real-goodware false-positive
 screen, **not an independently audited malware benchmark**.
 Package ownership alone does not establish that all files are benign.
 
+**Executed guest result, 19 Nov 2026:** 320 package-managed ELF binaries
+scanned in KVM, 320 emitted CLEAN, 0 SUSPICIOUS and 0 MALICIOUS. The observed
+benign alert rate is 0/320 (0.00%); the two-sided Wilson 95% **upper
+confidence bound is approximately 1.19%**, not 0.29%. The guest had no
+network or host-filesystem mounts and completed with its final marker.
+
 The staged engine is the previously extracted AetherAV release build, not a
 newly compiled R5 release, and its guest assets lack the complete malicious
 hash database. Results from it must therefore **not** be represented as a
@@ -78,6 +84,13 @@ shipping R5 all-engine validation. The sandbox is useful to expose compatibility
 and false-positive issues, but cannot establish the desired malware recall.
 
 ### 4. Fresh, independently audited holdout required
+
+**Executed historical exclusion-set build:** the pinned `ELF_train.zip` and
+`ELF_test.zip` yielded 64,000 source JSONL rows and **31,989 distinct
+SHA-256 hashes** after deduplication (manifest SHA-256
+`f7f1615cc45adb61a573aac4c7be1b1d75b8ab58c0aae9fa1ef030c84b00b23e`).
+Other previously evaluated non-EMBER corpora have not yet been added. The
+manifest explicitly marks the exclusion inventory as incomplete.
 
 Use `tools/build_exclusion_set.py` on pinned historical JSONL ZIP archives
 to prepare a combined SHA-256 exclusion set spanning training, validation,
