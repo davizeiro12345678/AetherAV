@@ -218,9 +218,12 @@ struct ScanArgs {
     /// Recurse into subdirectories.
     #[arg(long, short = 'r')]
     recursive: bool,
-    /// Emit machine-readable JSON instead of a human report.
+    /// Emit machine-readable JSON for threats instead of a human report.
     #[arg(long)]
     json: bool,
+    /// Include every scan report in JSON, including clean files and ELF metadata.
+    #[arg(long, requires = "json", conflicts_with = "quiet")]
+    all_reports: bool,
     /// Only print threats (suppress clean files).
     #[arg(long, short = 'q')]
     quiet: bool,
@@ -588,12 +591,16 @@ fn run_scan(mut config: Config, args: ScanArgs) -> Result<ExitCode> {
         .with_context(|| format!("scanning {}", args.path.display()))?;
 
     if args.json {
-        // One JSON object per threat line; summary last. Stable for piping.
-        for r in reports.iter().filter(|r| r.is_threat()) {
+        // Preserve the threat-only stream unless the caller requests all reports.
+        for r in reports.iter().filter(|r| args.all_reports || r.is_threat()) {
             println!("{}", to_json(r));
         }
     } else {
         for r in &reports {
+            let elf = r
+                .elf_header
+                .map(|status| format!("  [ELF header: {status}]"))
+                .unwrap_or_default();
             if r.is_threat() {
                 let worst = r
                     .verdicts
@@ -601,14 +608,15 @@ fn run_scan(mut config: Config, args: ScanArgs) -> Result<ExitCode> {
                     .max_by(|a, b| a.level.cmp(&b.level))
                     .unwrap();
                 println!(
-                    "{:<11} {}  [{}] {}",
+                    "{:<11} {}  [{}] {}{}",
                     r.disposition().to_string(),
                     r.path.display(),
                     worst.signature,
-                    worst.detail.as_deref().unwrap_or("")
+                    worst.detail.as_deref().unwrap_or(""),
+                    elf
                 );
             } else if !args.quiet {
-                println!("{:<11} {}", "CLEAN", r.path.display());
+                println!("{:<11} {}{}", "CLEAN", r.path.display(), elf);
             }
         }
         println!(
@@ -2649,30 +2657,30 @@ fn run_info(config: Config) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Minimal hand-rolled JSON for a report (avoids pulling serde_json into the
-/// CLI just for output; the structured types already derive Serialize for the
-/// daemon/API path).
+/// Preserve the CLI report fields and encode paths and signatures as JSON strings.
 fn to_json(r: &aether_common::ScanReport) -> String {
-    let verdicts: Vec<String> = r
+    let verdicts: Vec<_> = r
         .verdicts
         .iter()
         .map(|v| {
-            format!(
-                r#"{{"engine":"{:?}","level":"{}","signature":"{}","score":{:.3}}}"#,
-                v.engine,
-                v.level,
-                v.signature.replace('"', "\\\""),
-                v.score
-            )
+            serde_json::json!({
+                "engine": format!("{:?}", v.engine),
+                "level": v.level.to_string(),
+                "signature": v.signature,
+                "score": (f64::from(v.score) * 1_000.0).round() / 1_000.0,
+            })
         })
         .collect();
-    format!(
-        r#"{{"path":"{}","sha256":"{}","disposition":"{}","verdicts":[{}]}}"#,
-        r.path.display(),
-        r.hashes.sha256,
-        r.disposition(),
-        verdicts.join(",")
-    )
+    let mut report = serde_json::json!({
+        "path": r.path.to_string_lossy(),
+        "sha256": r.hashes.sha256,
+        "disposition": r.disposition().to_string(),
+        "verdicts": verdicts,
+    });
+    if let Some(status) = r.elf_header {
+        report["elf_header"] = serde_json::json!(status);
+    }
+    report.to_string()
 }
 
 // Keep the unused import warning-free in builds without threats path exercised.

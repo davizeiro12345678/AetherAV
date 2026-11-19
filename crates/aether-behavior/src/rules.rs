@@ -290,15 +290,21 @@ fn c2_beacon(events: &[Event], graph: &BehaviorGraph) -> Option<Verdict> {
         if stamps.len() < 4 {
             continue; // missing timestamps or coincident events
         }
-        let gaps: Vec<u64> = stamps.windows(2).map(|window| window[1]-window[0]).collect();
+        let gaps: Vec<u64> = stamps
+            .windows(2)
+            .map(|window| window[1] - window[0])
+            .collect();
         let mut sorted_gaps = gaps.clone();
         sorted_gaps.sort_unstable();
-        let median = sorted_gaps[sorted_gaps.len()/2];
+        let median = sorted_gaps[sorted_gaps.len() / 2];
         if median == 0 {
             continue;
         }
         // +-33% jitter around the median, avoiding u64 multiplication overflow.
-        if gaps.iter().all(|&gap| (gap.abs_diff(median) as u128) * 3 <= median as u128) {
+        if gaps
+            .iter()
+            .all(|&gap| (gap.abs_diff(median) as u128) * 3 <= median as u128)
+        {
             beacons.push(format!("{} -> {}:{}", graph.image_of(pid), remote, port));
         }
     }
@@ -360,7 +366,7 @@ fn persistence(events: &[Event]) -> Option<Verdict> {
 /// Classify a remote destination conservatively so internal traffic never
 /// becomes a spurious C2 alert. A public address alone is NOT proof of malware.
 fn is_public_remote(remote: &str) -> bool {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::IpAddr;
     let host = remote.trim().trim_end_matches('.');
     if host.is_empty() || host.chars().any(char::is_whitespace) {
         return false;
@@ -389,7 +395,14 @@ fn is_public_remote(remote: &str) -> bool {
     }
     // Reject local aliases, ambiguous single-label hosts and invalid literals.
     let host = host.to_ascii_lowercase();
-    let private_suffixes = [".localhost", ".local", ".internal", ".test", ".invalid", ".example"];
+    let private_suffixes = [
+        ".localhost",
+        ".local",
+        ".internal",
+        ".test",
+        ".invalid",
+        ".example",
+    ];
     if host == "localhost"
         || private_suffixes.iter().any(|suffix| host.ends_with(suffix))
         || host.chars().all(|c| c.is_ascii_digit() || c == '.')
@@ -397,13 +410,16 @@ fn is_public_remote(remote: &str) -> bool {
         return false;
     }
     let labels: Vec<_> = host.split('.').collect();
-    labels.len() >= 2 && labels.iter().all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-    })
+    labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        })
 }
 
 fn is_routable_ipv4(ip: std::net::Ipv4Addr) -> bool {
@@ -525,18 +541,18 @@ mod tests {
 
     #[test]
     fn missing_or_irregular_timestamps_are_not_a_beacon() {
-        for stamps in [
-            [0, 0, 0, 0],
-            [10, 20, 500, 10_000],
-        ] {
-            let data = format!(r#"[
+        for stamps in [[0, 0, 0, 0], [10, 20, 500, 10_000]] {
+            let data = format!(
+                r#"[
                 {{"pid":1,"action":"process_spawn","child_pid":2,"image":"pwsh.exe"}},
                 {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
                 {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
                 {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
                 {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}}
-            ]"#,stamps[0],stamps[1],stamps[2],stamps[3]);
-            let v=run(&data);
+            ]"#,
+                stamps[0], stamps[1], stamps[2], stamps[3]
+            );
+            let v = run(&data);
             assert!(!v.iter().any(|x| x.signature == "behavior.c2_beacon"));
         }
     }
@@ -544,14 +560,33 @@ mod tests {
     #[test]
     fn network_remote_excludes_reserved_and_documentation_addresses() {
         for address in [
-            "127.12.3.4", "0.0.0.0", "100.64.22.11", "169.254.12.8",
-            "172.31.99.22", "192.0.2.25", "198.51.100.9", "203.0.113.3",
-            "198.18.1.1", "224.0.0.1", "::1", "fe80::2", "fd12::1",
-            "2001:db8::53", "::ffff:192.168.1.9", "localhost.",
-            "printer.local", "service.internal", "host.test", "invalid..name",
-            "999.999.999.999", "",
+            "127.12.3.4",
+            "0.0.0.0",
+            "100.64.22.11",
+            "169.254.12.8",
+            "172.31.99.22",
+            "192.0.2.25",
+            "198.51.100.9",
+            "203.0.113.3",
+            "198.18.1.1",
+            "224.0.0.1",
+            "::1",
+            "fe80::2",
+            "fd12::1",
+            "2001:db8::53",
+            "::ffff:192.168.1.9",
+            "localhost.",
+            "printer.local",
+            "service.internal",
+            "host.test",
+            "invalid..name",
+            "999.999.999.999",
+            "",
         ] {
-            assert!(!is_public_remote(address), "{address} must not be treated as public");
+            assert!(
+                !is_public_remote(address),
+                "{address} must not be treated as public"
+            );
         }
         assert!(is_public_remote("8.8.8.8"));
         assert!(is_public_remote("2606:4700:4700::1111"));

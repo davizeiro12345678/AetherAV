@@ -146,11 +146,33 @@ pub struct FileHashes {
     pub size: u64,
 }
 
+/// Header-only ELF classification. This says nothing about the scan verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ElfHeaderStatus {
+    Valid,
+    Truncated,
+    Invalid,
+}
+
+impl fmt::Display for ElfHeaderStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Valid => "valid",
+            Self::Truncated => "truncated",
+            Self::Invalid => "invalid",
+        })
+    }
+}
+
 /// The complete result of scanning one file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
     pub path: PathBuf,
     pub hashes: FileHashes,
+    /// Present after seeing ELF magic, even if the header is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elf_header: Option<ElfHeaderStatus>,
     /// All findings, in the order engines produced them.
     pub verdicts: Vec<Verdict>,
     /// Wall-clock time spent scanning this file.
@@ -282,6 +304,7 @@ mod tests {
         let report = ScanReport {
             path: PathBuf::from("/tmp/x"),
             hashes: FileHashes::default(),
+            elf_header: None,
             verdicts: vec![
                 Verdict::suspicious(EngineKind::Heuristic, "pe_high_entropy", 0.6),
                 Verdict::malicious(EngineKind::Hash, "Win.Test.EICAR", 1.0),
@@ -297,6 +320,7 @@ mod tests {
         let report = ScanReport {
             path: PathBuf::from("/tmp/x"),
             hashes: FileHashes::default(),
+            elf_header: None,
             verdicts: vec![],
             elapsed: Duration::ZERO,
         };

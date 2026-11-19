@@ -159,6 +159,15 @@ mod tests {
     }
 
     #[test]
+    fn scan_route_distinguishes_truncated_elf_from_a_threat_verdict() {
+        let (status, body) = daemon().route("POST", "/scan", b"\x7fELF");
+        let report: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(report["elf_header"], "truncated");
+        assert_eq!(report["verdicts"], serde_json::json!([]));
+    }
+
+    #[test]
     fn behavior_route_detects_injection() {
         let d = daemon();
         let trace = br#"[

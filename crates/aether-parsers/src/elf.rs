@@ -5,8 +5,57 @@
 //! W^X violation), and the dynamic dependency list.
 
 use crate::section::SectionInfo;
-use aether_common::{Error, Result};
+use aether_common::{ElfHeaderStatus, Error, Result};
 use goblin::elf::Elf;
+
+/// Classify the ELF header without reading tables or trusting file extensions.
+pub fn inspect_header(data: &[u8]) -> Option<ElfHeaderStatus> {
+    if !data.starts_with(b"\x7fELF") {
+        return None;
+    }
+    if data.len() < 16 {
+        return Some(ElfHeaderStatus::Truncated);
+    }
+
+    let (minimum_size, size_offset) = match data[4] {
+        1 => (52, 40), // ELF32
+        2 => (64, 52), // ELF64
+        _ => return Some(ElfHeaderStatus::Invalid),
+    };
+    let little_endian = match data[5] {
+        1 => true,
+        2 => false,
+        _ => return Some(ElfHeaderStatus::Invalid),
+    };
+    if data[6] != 1 {
+        return Some(ElfHeaderStatus::Invalid);
+    }
+    if data.len() < minimum_size {
+        return Some(ElfHeaderStatus::Truncated);
+    }
+
+    let size_bytes = [data[size_offset], data[size_offset + 1]];
+    let version_bytes = [data[20], data[21], data[22], data[23]];
+    let (declared_size, version) = if little_endian {
+        (
+            u16::from_le_bytes(size_bytes),
+            u32::from_le_bytes(version_bytes),
+        )
+    } else {
+        (
+            u16::from_be_bytes(size_bytes),
+            u32::from_be_bytes(version_bytes),
+        )
+    };
+    let declared_size = usize::from(declared_size);
+    Some(if version != 1 || declared_size < minimum_size {
+        ElfHeaderStatus::Invalid
+    } else if data.len() < declared_size {
+        ElfHeaderStatus::Truncated
+    } else {
+        ElfHeaderStatus::Valid
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfArch {
@@ -108,6 +157,49 @@ impl ElfInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_elf32_and_elf64_in_both_byte_orders() {
+        for (class, size, size_offset) in [(1, 52, 40), (2, 64, 52)] {
+            for encoding in [1, 2] {
+                let mut bytes = [0; 64];
+                bytes[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', class, encoding, 1]);
+                if encoding == 1 {
+                    bytes[20] = 1;
+                    bytes[size_offset] = size as u8;
+                } else {
+                    bytes[23] = 1;
+                    bytes[size_offset + 1] = size as u8;
+                }
+                assert_eq!(inspect_header(&bytes[..size]), Some(ElfHeaderStatus::Valid));
+                assert_eq!(
+                    inspect_header(&bytes[..size - 1]),
+                    Some(ElfHeaderStatus::Truncated)
+                );
+                bytes[5] = 0;
+                assert_eq!(
+                    inspect_header(&bytes[..size]),
+                    Some(ElfHeaderStatus::Invalid)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distinguishes_non_elf_from_truncated_and_invalid_headers() {
+        assert_eq!(inspect_header(b"text"), None);
+        assert_eq!(inspect_header(b"\x7fELF"), Some(ElfHeaderStatus::Truncated));
+        let mut bytes = [0; 64];
+        bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        bytes[20] = 1;
+        bytes[52] = 63;
+        assert_eq!(inspect_header(&bytes), Some(ElfHeaderStatus::Invalid));
+        bytes[52] = 65;
+        assert_eq!(inspect_header(&bytes), Some(ElfHeaderStatus::Truncated));
+        bytes[52] = 64;
+        bytes[20] = 0;
+        assert_eq!(inspect_header(&bytes), Some(ElfHeaderStatus::Invalid));
+    }
 
     #[test]
     fn rejects_non_elf() {
