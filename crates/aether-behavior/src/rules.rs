@@ -330,29 +330,70 @@ fn persistence(events: &[Event]) -> Option<Verdict> {
     ))
 }
 
-/// Crude public-address check: private/loopback ranges are treated as internal;
-/// anything else (including bare hostnames) is treated as a potential C2.
+/// Classify a remote destination conservatively so internal traffic never
+/// becomes a spurious C2 alert. A public address alone is NOT proof of malware.
 fn is_public_remote(remote: &str) -> bool {
-    if remote.starts_with("127.")
-        || remote.starts_with("10.")
-        || remote.starts_with("192.168.")
-        || remote == "localhost"
-        || remote.starts_with("::1")
-        || remote.starts_with("169.254.")
+    use std::net::{IpAddr, Ipv4Addr};
+    let host = remote.trim().trim_end_matches('.');
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let ip_text = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = ip_text.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => is_routable_ipv4(v4),
+            IpAddr::V6(v6) => {
+                if let Some(mapped) = v6.to_ipv4_mapped() {
+                    return is_routable_ipv4(mapped);
+                }
+                let seg = v6.segments();
+                let first = seg[0];
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (first & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                    || (first & 0xffc0) == 0xfe80 // fe80::/10 link local
+                    || (first & 0xff00) == 0xff00 // multicast
+                    || (seg[0] == 0x2001 && seg[1] == 0x0db8)) // documentation
+            }
+        };
+    }
+    // Reject local aliases, ambiguous single-label hosts and invalid literals.
+    let host = host.to_ascii_lowercase();
+    let private_suffixes = [".localhost", ".local", ".internal", ".test", ".invalid", ".example"];
+    if host == "localhost"
+        || private_suffixes.iter().any(|suffix| host.ends_with(suffix))
+        || host.chars().all(|c| c.is_ascii_digit() || c == '.')
     {
         return false;
     }
-    // 172.16.0.0 - 172.31.255.255
-    if let Some(rest) = remote.strip_prefix("172.") {
-        if let Some(second) = rest.split('.').next() {
-            if let Ok(octet) = second.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    let labels: Vec<_> = host.split('.').collect();
+    labels.len() >= 2 && labels.iter().all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    })
+}
+
+fn is_routable_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || a >= 224
+        || (a == 100 && (64..=127).contains(&b)) // CGNAT
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 192 && b == 0 && c == 0) // IETF protocol assignments
+        || (a == 192 && b == 0 && c == 2) // TEST-NET-1
+        || (a == 198 && (b == 18 || b == 19)) // network benchmark
+        || (a == 198 && b == 51 && c == 100) // TEST-NET-2
+        || (a == 203 && b == 0 && c == 113)) // TEST-NET-3
 }
 
 #[cfg(test)]
