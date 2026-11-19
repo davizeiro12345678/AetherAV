@@ -435,6 +435,32 @@ mod tests {
     }
 
     #[test]
+    fn network_remote_excludes_reserved_and_documentation_addresses() {
+        for address in [
+            "127.12.3.4", "0.0.0.0", "100.64.22.11", "169.254.12.8",
+            "172.31.99.22", "192.0.2.25", "198.51.100.9", "203.0.113.3",
+            "198.18.1.1", "224.0.0.1", "::1", "fe80::2", "fd12::1",
+            "2001:db8::53", "::ffff:192.168.1.9", "localhost.",
+            "printer.local", "service.internal", "host.test", "invalid..name",
+            "999.999.999.999", "",
+        ] {
+            assert!(!is_public_remote(address), "{address} must not be treated as public");
+        }
+        assert!(is_public_remote("8.8.8.8"));
+        assert!(is_public_remote("2606:4700:4700::1111"));
+        assert!(is_public_remote("example.org"));
+    }
+
+    #[test]
+    fn private_network_from_script_does_not_raise_c2_warning() {
+        let v = run(r#"[
+            {"pid":1,"action":"process_spawn","child_pid":2,"image":"powershell.exe"},
+            {"pid":2,"action":"net_connect","remote":"100.64.0.17","port":443}
+        ]"#);
+        assert!(!v.iter().any(|x| x.signature == "behavior.c2_beacon"));
+    }
+
+    #[test]
     fn public_vs_private_remote() {
         assert!(is_public_remote("45.9.1.2"));
         assert!(!is_public_remote("192.168.1.5"));
