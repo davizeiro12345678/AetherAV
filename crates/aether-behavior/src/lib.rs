@@ -92,7 +92,10 @@ mod tests {
         let json = r#"[
             {"pid":1,"action":"process_spawn","child_pid":20,"image":"winword.exe"},
             {"pid":20,"action":"process_spawn","child_pid":30,"image":"powershell.exe","cmdline":"-enc AAAA"},
-            {"pid":30,"action":"net_connect","remote":"45.9.1.2","port":443}
+            {"ts":10,"pid":30,"action":"net_connect","remote":"45.9.1.2","port":443},
+            {"ts":20,"pid":30,"action":"net_connect","remote":"45.9.1.2","port":443},
+            {"ts":30,"pid":30,"action":"net_connect","remote":"45.9.1.2","port":443},
+            {"ts":40,"pid":30,"action":"net_connect","remote":"45.9.1.2","port":443}
         ]"#;
         let report = BehaviorEngine::new().analyze_json(json).unwrap();
         assert_eq!(report.disposition(), ThreatLevel::Malicious);

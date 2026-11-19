@@ -20,7 +20,7 @@ pub mod heuristics;
 use aether_common::{EngineKind, Error, Result, ScanReport, ScanSummary, Verdict};
 use aether_config::Config;
 use aether_ml::MlEngine;
-use aether_parsers::elf::ElfInfo;
+use aether_parsers::elf::{inspect_header, ElfInfo};
 use aether_parsers::macho::MachoInfo;
 use aether_parsers::office::OfficeIndicators;
 use aether_parsers::pdf::PdfIndicators;
@@ -253,6 +253,7 @@ impl Scanner {
             return ScanReport {
                 path: path.to_path_buf(),
                 hashes: hashes.clone(),
+                elf_header: inspect_header(data),
                 verdicts: verdicts.clone(),
                 elapsed: std::time::Duration::ZERO,
             };
@@ -269,6 +270,7 @@ impl Scanner {
     fn scan_bytes_depth(&self, path: &Path, data: &[u8], depth: u32) -> ScanReport {
         let start = Instant::now();
         let hashes = aether_signatures::hash_bytes(data);
+        let elf_header = inspect_header(data);
         let mut verdicts: Vec<Verdict> = Vec::new();
 
         // An empty file is never a threat - but its well-known hash erroneously
@@ -277,6 +279,7 @@ impl Scanner {
             return ScanReport {
                 path: path.to_path_buf(),
                 hashes,
+                elf_header,
                 verdicts,
                 elapsed: start.elapsed(),
             };
@@ -293,6 +296,7 @@ impl Scanner {
                 return ScanReport {
                     path: path.to_path_buf(),
                     hashes,
+                    elf_header,
                     verdicts,
                     elapsed: start.elapsed(),
                 };
@@ -520,6 +524,7 @@ impl Scanner {
         ScanReport {
             path: path.to_path_buf(),
             hashes,
+            elf_header,
             verdicts,
             elapsed: start.elapsed(),
         }
@@ -541,6 +546,7 @@ impl Scanner {
                     size: meta.len(),
                     ..Default::default()
                 },
+                elf_header: None,
                 verdicts: vec![],
                 elapsed: std::time::Duration::ZERO,
             });
@@ -864,6 +870,27 @@ mod tests {
         let report = scanner.scan_bytes(Path::new("hello.txt"), b"just some text");
         assert!(!report.is_threat());
         assert_eq!(report.hashes.size, 14);
+    }
+
+    #[test]
+    fn identifies_elf_without_heuristics_or_a_matching_extension() {
+        use aether_common::ElfHeaderStatus;
+
+        let mut cfg = test_config();
+        cfg.engines.heuristics = false;
+        cfg.scan.cache = true;
+        let scanner = Scanner::new(cfg).unwrap();
+        let mut bytes = [0; 64];
+        bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        bytes[20] = 1;
+        bytes[52] = 64;
+        for path in ["no-extension", "renamed.txt"] {
+            let report = scanner.scan_bytes(Path::new(path), &bytes);
+            assert_eq!(report.elf_header, Some(ElfHeaderStatus::Valid));
+            assert!(!report.is_threat());
+        }
+        let fake_extension = scanner.scan_bytes(Path::new("text.elf"), b"ordinary text");
+        assert_eq!(fake_extension.elf_header, None);
     }
 
     #[test]

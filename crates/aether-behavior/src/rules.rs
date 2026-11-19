@@ -262,30 +262,63 @@ fn ransomware(events: &[Event], graph: &BehaviorGraph) -> Option<Verdict> {
     Some(verdict(level, "behavior.ransomware", score, &mitre, detail))
 }
 
-/// T1071 / T1105 - a script host or injected process beaconing to a public host.
+/// T1071 - a script process repeatedly contacts the same public endpoint.
+/// One connection is ordinary application behavior, not a C2 beacon. Units are
+/// intentionally source-defined: regularity is a ratio of observed intervals.
 fn c2_beacon(events: &[Event], graph: &BehaviorGraph) -> Option<Verdict> {
-    let mut hits = Vec::new();
+    let mut connections: HashMap<(u32, String, u16), Vec<u64>> = HashMap::new();
     for ev in events {
         if let Action::NetConnect { remote, port } = &ev.action {
             let image = graph.image_of(ev.pid);
             if (is_script_host(image) || graph.has_ancestor_in(ev.pid, OFFICE_APPS))
                 && is_public_remote(remote)
             {
-                hits.push(format!("{} -> {}:{}", image, remote, port));
+                connections
+                    .entry((ev.pid, remote.to_ascii_lowercase(), *port))
+                    .or_default()
+                    .push(ev.ts);
             }
         }
     }
-    if hits.is_empty() {
+    let mut beacons = Vec::new();
+    for ((pid, remote, port), mut stamps) in connections {
+        if stamps.len() < 4 {
+            continue;
+        }
+        stamps.sort_unstable();
+        stamps.dedup();
+        if stamps.len() < 4 {
+            continue; // missing timestamps or coincident events
+        }
+        let gaps: Vec<u64> = stamps
+            .windows(2)
+            .map(|window| window[1] - window[0])
+            .collect();
+        let mut sorted_gaps = gaps.clone();
+        sorted_gaps.sort_unstable();
+        let median = sorted_gaps[sorted_gaps.len() / 2];
+        if median == 0 {
+            continue;
+        }
+        // +-33% jitter around the median, avoiding u64 multiplication overflow.
+        if gaps
+            .iter()
+            .all(|&gap| (gap.abs_diff(median) as u128) * 3 <= median as u128)
+        {
+            beacons.push(format!("{} -> {}:{}", graph.image_of(pid), remote, port));
+        }
+    }
+    if beacons.is_empty() {
         return None;
     }
     Some(verdict(
         ThreatLevel::Suspicious,
         "behavior.c2_beacon",
-        0.7,
-        &["T1071", "T1105"],
+        0.72,
+        &["T1071"],
         format!(
-            "script/interpreter contacted external host(s): {}",
-            hits.join(", ")
+            "repeated time-correlated outbound connections (not conclusive proof of C2): {}",
+            beacons.join(", ")
         ),
     ))
 }
@@ -330,29 +363,80 @@ fn persistence(events: &[Event]) -> Option<Verdict> {
     ))
 }
 
-/// Crude public-address check: private/loopback ranges are treated as internal;
-/// anything else (including bare hostnames) is treated as a potential C2.
+/// Classify a remote destination conservatively so internal traffic never
+/// becomes a spurious C2 alert. A public address alone is NOT proof of malware.
 fn is_public_remote(remote: &str) -> bool {
-    if remote.starts_with("127.")
-        || remote.starts_with("10.")
-        || remote.starts_with("192.168.")
-        || remote == "localhost"
-        || remote.starts_with("::1")
-        || remote.starts_with("169.254.")
+    use std::net::IpAddr;
+    let host = remote.trim().trim_end_matches('.');
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let ip_text = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = ip_text.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => is_routable_ipv4(v4),
+            IpAddr::V6(v6) => {
+                if let Some(mapped) = v6.to_ipv4_mapped() {
+                    return is_routable_ipv4(mapped);
+                }
+                let seg = v6.segments();
+                let first = seg[0];
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (first & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                    || (first & 0xffc0) == 0xfe80 // fe80::/10 link local
+                    || (first & 0xff00) == 0xff00 // multicast
+                    || (seg[0] == 0x2001 && seg[1] == 0x0db8)) // documentation
+            }
+        };
+    }
+    // Reject local aliases, ambiguous single-label hosts and invalid literals.
+    let host = host.to_ascii_lowercase();
+    let private_suffixes = [
+        ".localhost",
+        ".local",
+        ".internal",
+        ".test",
+        ".invalid",
+        ".example",
+    ];
+    if host == "localhost"
+        || private_suffixes.iter().any(|suffix| host.ends_with(suffix))
+        || host.chars().all(|c| c.is_ascii_digit() || c == '.')
     {
         return false;
     }
-    // 172.16.0.0 - 172.31.255.255
-    if let Some(rest) = remote.strip_prefix("172.") {
-        if let Some(second) = rest.split('.').next() {
-            if let Ok(octet) = second.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    let labels: Vec<_> = host.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        })
+}
+
+fn is_routable_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || a >= 224
+        || (a == 100 && (64..=127).contains(&b)) // CGNAT
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 192 && b == 0 && c == 0) // IETF protocol assignments
+        || (a == 192 && b == 0 && c == 2) // TEST-NET-1
+        || (a == 198 && (b == 18 || b == 19)) // network benchmark
+        || (a == 198 && b == 51 && c == 100) // TEST-NET-2
+        || (a == 203 && b == 0 && c == 113)) // TEST-NET-3
 }
 
 #[cfg(test)]
@@ -432,6 +516,90 @@ mod tests {
             {"pid":20,"action":"file_write","path":"C:\\docs\\note.txt","entropy":3.1}
         ]"#);
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn one_legitimate_public_connection_is_not_a_beacon() {
+        let v = run(r#"[
+            {"ts":5,"pid":1,"action":"process_spawn","child_pid":2,"image":"pwsh.exe"},
+            {"ts":7,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}
+        ]"#);
+        assert!(!v.iter().any(|x| x.signature == "behavior.c2_beacon"));
+    }
+
+    #[test]
+    fn repetitive_regular_egress_from_script_is_suspicious() {
+        let v = run(r#"[
+            {"ts":1,"pid":1,"action":"process_spawn","child_pid":2,"image":"pwsh.exe"},
+            {"ts":10,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443},
+            {"ts":20,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443},
+            {"ts":30,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443},
+            {"ts":40,"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}
+        ]"#);
+        assert!(v.iter().any(|x| x.signature == "behavior.c2_beacon"));
+    }
+
+    #[test]
+    fn missing_or_irregular_timestamps_are_not_a_beacon() {
+        for stamps in [[0, 0, 0, 0], [10, 20, 500, 10_000]] {
+            let data = format!(
+                r#"[
+                {{"pid":1,"action":"process_spawn","child_pid":2,"image":"pwsh.exe"}},
+                {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
+                {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
+                {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}},
+                {{"ts":{},"pid":2,"action":"net_connect","remote":"8.8.8.8","port":443}}
+            ]"#,
+                stamps[0], stamps[1], stamps[2], stamps[3]
+            );
+            let v = run(&data);
+            assert!(!v.iter().any(|x| x.signature == "behavior.c2_beacon"));
+        }
+    }
+
+    #[test]
+    fn network_remote_excludes_reserved_and_documentation_addresses() {
+        for address in [
+            "127.12.3.4",
+            "0.0.0.0",
+            "100.64.22.11",
+            "169.254.12.8",
+            "172.31.99.22",
+            "192.0.2.25",
+            "198.51.100.9",
+            "203.0.113.3",
+            "198.18.1.1",
+            "224.0.0.1",
+            "::1",
+            "fe80::2",
+            "fd12::1",
+            "2001:db8::53",
+            "::ffff:192.168.1.9",
+            "localhost.",
+            "printer.local",
+            "service.internal",
+            "host.test",
+            "invalid..name",
+            "999.999.999.999",
+            "",
+        ] {
+            assert!(
+                !is_public_remote(address),
+                "{address} must not be treated as public"
+            );
+        }
+        assert!(is_public_remote("8.8.8.8"));
+        assert!(is_public_remote("2606:4700:4700::1111"));
+        assert!(is_public_remote("example.org"));
+    }
+
+    #[test]
+    fn private_network_from_script_does_not_raise_c2_warning() {
+        let v = run(r#"[
+            {"pid":1,"action":"process_spawn","child_pid":2,"image":"powershell.exe"},
+            {"pid":2,"action":"net_connect","remote":"100.64.0.17","port":443}
+        ]"#);
+        assert!(!v.iter().any(|x| x.signature == "behavior.c2_beacon"));
     }
 
     #[test]
