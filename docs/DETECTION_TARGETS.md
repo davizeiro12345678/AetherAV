@@ -44,3 +44,37 @@ Exit codes: **0** meets the gate; **1** does not meet all criteria; **2** malfor
 For **3,000 malware and 2,989 benign** files, the bare point target requires at least **2,970 TP** and at most **8 FP**. That sample may still fail the stricter confidence gate even at those counts.
 
 **Status, 19 Nov 2026:** An experimental Aegis34-R3 metadata-only benchmark on a previously consulted ELF split did not meet either threshold. The gate is a necessary validation tool, **not proof that recall or FPR has improved**.
+
+## Calibration of the static PE model
+
+The legacy training script previously emitted a fixed threshold of 0.6 for
+every model, regardless of the benign false-positive distribution. The revised
+training command calibrates a candidate **only on a separate labeled validation
+CSV**, under the requested 0.29% FPR budget:
+
+```bash
+python3 tools/train_pe_model.py \
+  --data train-features.csv \
+  --validation-data validation-features.csv \
+  --label-col label --hash-col sha256 \
+  --target-fpr 0.0029 --kind logistic \
+  --out candidate-pe.json
+```
+
+Both CSVs must contain the same 12 PE feature columns, binary labels, and
+nonempty nonoverlapping unique SHA-256 hashes. The training model is fit only
+on training examples. The validation-derived threshold is rounded upward to
+a representable float32 because Rust loads model thresholds as float32.
+
+Without a validation CSV the script refuses to export, unless
+`--allow-unvalidated` is specified; that explicit research-only escape hatch
+labels the resulting model `UNVALIDATED_NOT_FOR_RELEASE`. Calibration
+alone **does not** establish the two production goals or replace the
+independent end-to-end release gate. Validate the actual Rust scorer and all
+other protection engines together against a fresh holdout before any promotion.
+
+Run both groups of Python tests:
+
+```bash
+python3 -m unittest discover -s tools -p 'test_*.py'
+```
